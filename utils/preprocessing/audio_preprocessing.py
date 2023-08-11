@@ -1,11 +1,20 @@
-import os
-import glob
-
 import librosa
 import numpy as np
 
 import tensorflow as tf
 import tensorflow_io as tfio
+
+from config import config
+
+def extend_audio(audio,):
+    if len(audio)>config.samples:
+        audio = audio[:config.samples]
+    elif len(audio)<config.samples:
+        repeat = config.samples//len(audio)
+        remainder = config.samples%len(audio)
+        audio = np.concatenate([audio]*repeat+[audio[:remainder]])
+
+    return audio
 
 def add_reverb(audio,sr,reverb_duration=4,decay_rate=0.5):
     reverb_samples = int(sr*reverb_duration)
@@ -14,9 +23,8 @@ def add_reverb(audio,sr,reverb_duration=4,decay_rate=0.5):
     reverberant_audio = np.convolve(audio,impulse_response,mode='full')
     return reverberant_audio[:len(audio)]
 
-def add_noise(audio,sr,noise_dir,noise_level=0.40):
-    noise_files = glob.glob(noise_dir+'/*.ogg')
-    noise_file = np.random.choice(noise_files,size=1)
+def add_noise(audio,sr,noise_level=0.40):
+    noise_file = np.random.choice(config.noise_files,size=1)
     noise,_ = librosa.load(noise_file[0],sr=sr)
     if len(noise)>len(audio):
         noise = noise[:len(audio)]
@@ -27,24 +35,18 @@ def add_noise(audio,sr,noise_dir,noise_level=0.40):
 
     return audio + noise_level * noise
 
-def read_audio(audio_paths,config,noise_dir=None):
-    spectrograms = []
-    for path in audio_paths:
-        audio,_ = librosa.load(path.decode('utf-8'),sr=config.sr)
-        augmented_audio = add_reverb(audio,config.sr)
-        if noise_dir is not None:
-            augmented_audio = add_noise(augmented_audio,config.sr,noise_dir)
-        augmented_audio = tf.cast(augmented_audio,tf.float32)
-        spectrogram = tfio.audio.spectrogram(augmented_audio,nfft=config.n_fft,
+def read_audio(audio_path):
+    audio,_ = librosa.load(audio_path,sr=config.sr)
+    audio = extend_audio(audio)
+    audio = tf.cast(audio,tf.float32)
+    spectrogram = tfio.audio.spectrogram(audio,nfft=config.n_fft,
                                              window=config.window,stride=config.hop_length)
+    spec_masked = tfio.audio.freq_mask(spectrogram,param=config.freq_param)
         
-        mel_spec = tfio.audio.melscale(spectrogram,rate=config.sr,mels=config.n_mels,
-                                       fmin=config.fmin,fmax=config.fmax)
+    masked_audio = tfio.audio.inverse_spectrogram(spec_masked, nfft=config.n_fft, window=config.window, 
+                                                    stride=config.hop_length, iterations=30)
         
-        mel_spec_db = tfio.audio.dbscale(mel_spec,top_db=config.top_db)
-
-        mel_spec_masked = tfio.audio.freq_mask(mel_spec_db,param=config.freq_param)
-
-        spectrograms.append(mel_spec_db)
-
-    return np.array(spectrograms,dtype=object)
+    augmented_audio = add_reverb(masked_audio,config.sr)
+    augmented_audio = add_noise(masked_audio,config.sr)
+    
+    return augmented_audio
